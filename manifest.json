@@ -6,7 +6,8 @@
   "permissions": [
     "downloads",
     "activeTab",
-    "webRequest"
+    "webRequest",
+    "offscreen"
   ],
   "host_permissions": [
     "<all_urls>"
