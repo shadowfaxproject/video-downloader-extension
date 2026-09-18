@@ -1,4 +1,4 @@
-// popup.js - Controls UI interaction, HLS streaming assembly, and downloads
+// popup.js - Controls UI interaction, communicates with background downloader
 
 document.addEventListener("DOMContentLoaded", async () => {
   const loadingState = document.getElementById("loading-state");
@@ -31,7 +31,6 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   let activeVideo = null;
   let activeTab = null;
-  let isDownloadingHls = false;
 
   function showToast(message, isError = false) {
     toast.textContent = message;
@@ -80,6 +79,43 @@ document.addEventListener("DOMContentLoaded", async () => {
     return `${clean}.${ext.toLowerCase()}`;
   }
 
+  function updateProgressUI(progress) {
+    progressContainer.classList.remove("hidden");
+    const pct = `${progress.percent}%`;
+    progressPercent.textContent = pct;
+    progressBarFill.style.width = pct;
+    if (progress.stage === "init") {
+      progressLabel.textContent = "Downloading stream header...";
+    } else {
+      progressLabel.textContent = "Downloading in background...";
+      const sizeStr = progress.bytes ? ` (${formatBytes(progress.bytes)})` : "";
+      progressDetails.textContent = `${progress.current} / ${progress.total} segments${sizeStr}`;
+    }
+  }
+
+  // Listen for real-time progress broadcasted by background service worker
+  chrome.runtime.onMessage.addListener((msg) => {
+    if (!activeTab || msg.tabId !== activeTab.id) return;
+
+    if (msg.type === "HLS_PROGRESS_UPDATE") {
+      updateProgressUI(msg.progress);
+    } else if (msg.type === "HLS_COMPLETED") {
+      progressLabel.textContent = "Download complete!";
+      progressPercent.textContent = "100%";
+      progressBarFill.style.width = "100%";
+      progressDetails.textContent = `Saved: ${formatBytes(msg.sizeBytes)}`;
+      downloadBtn.disabled = false;
+      downloadBtn.style.opacity = "1";
+      showToast("Download finished and saved to Downloads folder!");
+    } else if (msg.type === "HLS_ERROR") {
+      progressLabel.textContent = "Download failed.";
+      progressDetails.textContent = msg.error;
+      downloadBtn.disabled = false;
+      downloadBtn.style.opacity = "1";
+      showToast("Download error: " + msg.error, true);
+    }
+  });
+
   async function loadVideos() {
     loadingState.classList.remove("hidden");
     emptyState.classList.add("hidden");
@@ -97,12 +133,27 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     activeTab = tabs[0];
 
+    // Check if background worker is already downloading on this tab
+    try {
+      const statusRes = await chrome.runtime.sendMessage({
+        type: "GET_HLS_STATUS",
+        tabId: activeTab.id
+      });
+      if (statusRes?.job && statusRes.job.status === "downloading") {
+        updateProgressUI(statusRes.job.progress);
+        downloadBtn.disabled = true;
+        downloadBtn.style.opacity = "0.7";
+      }
+    } catch (err) {
+      console.warn("[Popup] Could not get download status:", err);
+    }
+
     // 1. Query DOM video detector from content script
     let domResult = null;
     try {
       domResult = await chrome.tabs.sendMessage(activeTab.id, { type: "GET_MAIN_VIDEO" });
     } catch (err) {
-      console.warn("[Popup] Could not reach content script:", err);
+      console.warn("[Popup] Content script not reachable:", err);
     }
 
     // 2. Query network sniffed videos from background script
@@ -121,7 +172,6 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     let mainCandidate = null;
 
-    // Prioritize direct HTTP/HTTPS source from DOM if valid
     if (domResult?.mainVideo && domResult.mainVideo.directUrl) {
       const domUrl = domResult.mainVideo.directUrl;
       const isHls = checkIsHls(domUrl);
@@ -134,10 +184,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         isHls: isHls,
         isBlob: false
       };
-    } 
-    // Fallback: If DOM video is blob-based or absent, check network sniffed streams
-    else if (networkVideos.length > 0) {
-      // Prioritize full playlists or genuine video streams (not lone segment chunks)
+    } else if (networkVideos.length > 0) {
       const nonSegment = networkVideos.find(n => !n.isSegment);
       const topNetVideo = nonSegment || networkVideos[0];
       const isHls = checkIsHls(topNetVideo.url, topNetVideo.isHls);
@@ -152,9 +199,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         isHls: isHls,
         isBlob: false
       };
-    } 
-    // Fallback: DOM only has blob URL
-    else if (domResult?.mainVideo) {
+    } else if (domResult?.mainVideo) {
       const isHls = checkIsHls(domResult.mainVideo.url);
       mainCandidate = {
         url: domResult.mainVideo.url,
@@ -173,7 +218,6 @@ document.addEventListener("DOMContentLoaded", async () => {
       return;
     }
 
-    // Main video found!
     activeVideo = mainCandidate;
     statusBadge.textContent = "Detected";
     statusBadge.className = "badge success";
@@ -224,9 +268,6 @@ document.addEventListener("DOMContentLoaded", async () => {
       downloadBtn.disabled = true;
       downloadBtn.style.opacity = "0.6";
       showToast("Play the video for a few seconds to capture the stream.", true);
-    } else {
-      downloadBtn.disabled = false;
-      downloadBtn.style.opacity = "1";
     }
 
     // Render secondary videos
@@ -259,7 +300,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         dlBtn.textContent = vid.isHls ? "Assemble" : "Download";
         dlBtn.addEventListener("click", () => {
           if (vid.isHls) {
-            handleHlsDownload(vid.url, `video_${idx + 2}.ts`);
+            startHlsBackgroundDownload(vid.url, `video_${idx + 2}.ts`);
           } else {
             triggerDirectDownload(vid.url, sanitizeFilename(`video_${idx + 2}`, vidExt));
           }
@@ -274,7 +315,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   }
 
-  // Direct MP4 / WebM download
   function triggerDirectDownload(url, filename) {
     showToast("Starting download...");
     chrome.runtime.sendMessage(
@@ -286,84 +326,42 @@ document.addEventListener("DOMContentLoaded", async () => {
       },
       (response) => {
         if (response && response.success) {
-          showToast("Download launched! Check downloads folder.");
+          showToast("Download launched in Chrome!");
         } else {
-          showToast(response?.error || "Download failed. Check server/internet.", true);
+          showToast(response?.error || "Download failed. Check connection.", true);
         }
       }
     );
   }
 
-  // HLS Stream (.m3u8) downloader and assembler
-  async function handleHlsDownload(m3u8Url, targetFilename) {
-    if (isDownloadingHls) return;
-    isDownloadingHls = true;
-
+  // Hand off HLS stream assembly to persistent background service worker
+  function startHlsBackgroundDownload(m3u8Url, targetFilename) {
     downloadBtn.disabled = true;
     downloadBtn.style.opacity = "0.7";
     progressContainer.classList.remove("hidden");
-    progressLabel.textContent = "Fetching stream playlist...";
+    progressLabel.textContent = "Starting background download...";
     progressPercent.textContent = "0%";
     progressBarFill.style.width = "0%";
     progressDetails.textContent = "Connecting...";
 
-    showToast("Assembling HLS stream segments...");
+    showToast("Download running in background! Safe to switch windows or apps.");
 
-    try {
-      const result = await assembleHlsStream(m3u8Url, {
-        referer: activeTab ? activeTab.url : null,
-        onProgress: (progress) => {
-          const pct = `${progress.percent}%`;
-          progressPercent.textContent = pct;
-          progressBarFill.style.width = pct;
-          if (progress.stage === "init") {
-            progressLabel.textContent = "Downloading stream header...";
-          } else {
-            progressLabel.textContent = "Downloading & stitching video segments...";
-            const sizeStr = progress.bytes ? ` (${formatBytes(progress.bytes)})` : "";
-            progressDetails.textContent = `${progress.current} / ${progress.total} segments${sizeStr}`;
-          }
+    chrome.runtime.sendMessage(
+      {
+        type: "START_HLS_DOWNLOAD",
+        tabId: activeTab.id,
+        url: m3u8Url,
+        filename: targetFilename,
+        referer: activeTab ? activeTab.url : null
+      },
+      (response) => {
+        if (chrome.runtime.lastError) {
+          showToast("Could not start background job: " + chrome.runtime.lastError.message, true);
+          downloadBtn.disabled = false;
+          downloadBtn.style.opacity = "1";
         }
-      });
-
-      // Strict validation: check blob size
-      if (!result.blob || result.blob.size === 0) {
-        throw new Error("Assembled video file is empty (0 bytes received).");
       }
-
-      progressLabel.textContent = "Stream assembled successfully!";
-      progressPercent.textContent = "100%";
-      progressBarFill.style.width = "100%";
-      progressDetails.textContent = `Completed: ${formatBytes(result.sizeBytes)}`;
-
-      const blobUrl = URL.createObjectURL(result.blob);
-      const finalFilename = targetFilename.replace(/\.(ts|mp4|m3u8)$/i, "") + `.${result.extension}`;
-
-      chrome.downloads.download(
-        {
-          url: blobUrl,
-          filename: finalFilename,
-          saveAs: true
-        },
-        (dlId) => {
-          if (chrome.runtime.lastError) {
-            showToast("Save failed: " + chrome.runtime.lastError.message, true);
-          } else {
-            showToast(`Saved complete video (${formatBytes(result.sizeBytes)})!`);
-          }
-          setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
-        }
-      );
-    } catch (err) {
-      console.error("[HLS Download Failed]:", err);
-      showToast(err.message, true);
-      progressLabel.textContent = "Download failed.";
-      progressDetails.textContent = err.message;
-    } finally {
-      isDownloadingHls = false;
-      downloadBtn.disabled = false;
-      downloadBtn.style.opacity = "1";
-    }
+    );
   }
 
   // Action listeners
@@ -372,7 +370,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     const filename = filenameInput.value.trim() || "video.mp4";
 
     if (activeVideo.isHls) {
-      handleHlsDownload(activeVideo.url, filename);
+      startHlsBackgroundDownload(activeVideo.url, filename);
     } else {
       triggerDirectDownload(activeVideo.url, filename);
     }

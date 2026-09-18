@@ -1,16 +1,137 @@
-// background.js - Service worker for media stream sniffing and download execution
+// background.js - Service worker for media stream sniffing and background download execution
+importScripts("hlsDownloader.js");
 
 // Tab-based cache of detected media streams: tabId -> Map(url -> mediaItem)
 const tabMediaMap = new Map();
+
+// Active HLS background download jobs: tabId -> job state
+const activeHlsJobs = new Map();
 
 // Regex matching direct video file formats
 const VIDEO_EXT_REGEX = /\.(mp4|webm|mkv|mov|m4v|ogv)(\?.*)?$/i;
 const HLS_REGEX = /\.m3u8(\?.*)?$/i;
 
+// Keep-alive mechanism to prevent service worker termination during downloads
+let keepAliveInterval = null;
+
+function ensureKeepAlive() {
+  if (!keepAliveInterval) {
+    keepAliveInterval = setInterval(() => {
+      chrome.runtime.getPlatformInfo(() => {});
+    }, 15000);
+  }
+}
+
+function clearKeepAliveIfIdle() {
+  let hasActive = false;
+  for (const job of activeHlsJobs.values()) {
+    if (job.status === "downloading") {
+      hasActive = true;
+      break;
+    }
+  }
+  if (!hasActive && keepAliveInterval) {
+    clearInterval(keepAliveInterval);
+    keepAliveInterval = null;
+  }
+}
+
+// Background HLS downloader and segment assembler
+async function runHlsDownload(tabId, url, filename, referer) {
+  const job = {
+    tabId,
+    url,
+    filename,
+    status: "downloading",
+    progress: { current: 0, total: 0, percent: 0, bytes: 0, stage: "init" },
+    error: null,
+    startedAt: Date.now()
+  };
+  activeHlsJobs.set(tabId, job);
+  ensureKeepAlive();
+
+  chrome.action.setBadgeText({ tabId, text: "0%" }).catch(() => {});
+  chrome.action.setBadgeBackgroundColor({ tabId, color: "#2563EB" }).catch(() => {});
+
+  try {
+    const result = await assembleHlsStream(url, {
+      referer: referer,
+      onProgress: (progress) => {
+        job.progress = progress;
+        const pctText = `${progress.percent}%`;
+        chrome.action.setBadgeText({ tabId, text: pctText }).catch(() => {});
+
+        // Broadcast to popup if open
+        chrome.runtime.sendMessage({
+          type: "HLS_PROGRESS_UPDATE",
+          tabId,
+          progress
+        }).catch(() => {});
+      }
+    });
+
+    if (!result.blob || result.blob.size === 0) {
+      throw new Error("Assembled stream is empty (0 bytes received).");
+    }
+
+    job.status = "completed";
+    job.progress.percent = 100;
+    job.sizeBytes = result.sizeBytes;
+
+    chrome.action.setBadgeText({ tabId, text: "100%" }).catch(() => {});
+    chrome.action.setBadgeBackgroundColor({ tabId, color: "#10B981" }).catch(() => {});
+
+    const blobUrl = URL.createObjectURL(result.blob);
+    const finalFilename = filename.replace(/\.(ts|mp4|m3u8)$/i, "") + `.${result.extension}`;
+
+    chrome.downloads.download(
+      {
+        url: blobUrl,
+        filename: finalFilename,
+        saveAs: true
+      },
+      (dlId) => {
+        if (chrome.runtime.lastError) {
+          console.error("Save error:", chrome.runtime.lastError.message);
+        }
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+      }
+    );
+
+    // Reset badge after 5 seconds
+    setTimeout(() => {
+      if (activeHlsJobs.get(tabId)?.status === "completed") {
+        chrome.action.setBadgeText({ tabId, text: "" }).catch(() => {});
+      }
+    }, 5000);
+
+    chrome.runtime.sendMessage({
+      type: "HLS_COMPLETED",
+      tabId,
+      filename: finalFilename,
+      sizeBytes: result.sizeBytes
+    }).catch(() => {});
+
+  } catch (err) {
+    console.error("[HLS Download Error]:", err);
+    job.status = "error";
+    job.error = err.message;
+    chrome.action.setBadgeText({ tabId, text: "ERR" }).catch(() => {});
+    chrome.action.setBadgeBackgroundColor({ tabId, color: "#EF4444" }).catch(() => {});
+
+    chrome.runtime.sendMessage({
+      type: "HLS_ERROR",
+      tabId,
+      error: err.message
+    }).catch(() => {});
+  } finally {
+    clearKeepAliveIfIdle();
+  }
+}
+
 // Filter and record valid media responses
 chrome.webRequest.onHeadersReceived.addListener(
   (details) => {
-    // Only process valid responses (HTTP 200, 206)
     if (details.tabId <= 0 || (details.statusCode && details.statusCode >= 400)) {
       return;
     }
@@ -30,11 +151,10 @@ chrome.webRequest.onHeadersReceived.addListener(
     if (isVideoType || isVideoExt || isHls) {
       const sizeBytes = contentLengthHeader ? parseInt(contentLengthHeader.value, 10) : null;
 
-      // STRICT FILTER: Ignore 0-byte responses or tiny asset pings (< 50KB for non-HLS)
+      // Filter out 0-byte or tiny asset responses (< 50KB for non-HLS)
       if (sizeBytes === 0) return;
       if (!isHls && sizeBytes !== null && sizeBytes < 51200) return;
 
-      // Ignore single HLS segment chunks (.ts / .m4s) in the main list if they are just streaming fragments
       const isSegmentChunk = /\.(ts|m4s)(\?.*)?$/i.test(details.url);
 
       if (!tabMediaMap.has(details.tabId)) {
@@ -43,7 +163,6 @@ chrome.webRequest.onHeadersReceived.addListener(
 
       const mediaList = tabMediaMap.get(details.tabId);
 
-      // Store media metadata
       mediaList.set(details.url, {
         url: details.url,
         type: isHls ? "application/x-mpegURL" : (contentType || "video/mp4"),
@@ -54,15 +173,17 @@ chrome.webRequest.onHeadersReceived.addListener(
         detectedAt: Date.now()
       });
 
-      // Filter out isolated segments when counting for toolbar badge
-      let primaryMediaCount = 0;
-      for (const item of mediaList.values()) {
-        if (!item.isSegment) primaryMediaCount++;
-      }
-
-      if (primaryMediaCount > 0) {
-        chrome.action.setBadgeText({ tabId: details.tabId, text: String(primaryMediaCount) }).catch(() => {});
-        chrome.action.setBadgeBackgroundColor({ tabId: details.tabId, color: "#2563EB" }).catch(() => {});
+      // Update badge only if not currently actively downloading
+      const activeJob = activeHlsJobs.get(details.tabId);
+      if (!activeJob || activeJob.status !== "downloading") {
+        let primaryMediaCount = 0;
+        for (const item of mediaList.values()) {
+          if (!item.isSegment) primaryMediaCount++;
+        }
+        if (primaryMediaCount > 0) {
+          chrome.action.setBadgeText({ tabId: details.tabId, text: String(primaryMediaCount) }).catch(() => {});
+          chrome.action.setBadgeBackgroundColor({ tabId: details.tabId, color: "#2563EB" }).catch(() => {});
+        }
       }
     }
   },
@@ -74,6 +195,7 @@ chrome.webRequest.onHeadersReceived.addListener(
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status === "loading") {
     tabMediaMap.delete(tabId);
+    activeHlsJobs.delete(tabId);
     chrome.action.setBadgeText({ tabId: tabId, text: "" }).catch(() => {});
   }
 });
@@ -81,6 +203,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 // Clean up cache when tab is closed
 chrome.tabs.onRemoved.addListener((tabId) => {
   tabMediaMap.delete(tabId);
+  activeHlsJobs.delete(tabId);
 });
 
 // Message listener
@@ -89,7 +212,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.type === "VIDEO_DETECTED") {
     const targetTabId = tabId || message.tabId;
-    if (targetTabId) {
+    const activeJob = activeHlsJobs.get(targetTabId);
+    if (targetTabId && (!activeJob || activeJob.status !== "downloading")) {
       chrome.action.setBadgeText({ tabId: targetTabId, text: "1" }).catch(() => {});
       chrome.action.setBadgeBackgroundColor({ tabId: targetTabId, color: "#2563EB" }).catch(() => {});
     }
@@ -101,7 +225,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     let media = [];
     if (tabMediaMap.has(requestedTabId)) {
       media = Array.from(tabMediaMap.get(requestedTabId).values());
-      // Prioritize full playlists and direct files over segment chunks
       media.sort((a, b) => {
         if (a.isHls && !b.isHls) return -1;
         if (!a.isHls && b.isHls) return 1;
@@ -111,6 +234,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
     }
     sendResponse({ videos: media });
+  }
+
+  else if (message.type === "GET_HLS_STATUS") {
+    const requestedTabId = message.tabId;
+    const job = activeHlsJobs.get(requestedTabId) || null;
+    sendResponse({ job });
+  }
+
+  else if (message.type === "START_HLS_DOWNLOAD") {
+    const { url, filename, referer, tabId: requestedTabId } = message;
+    runHlsDownload(requestedTabId, url, filename, referer);
+    sendResponse({ success: true });
   }
 
   else if (message.type === "DOWNLOAD_VIDEO") {
@@ -129,7 +264,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
     }
 
-    // Sanitize filename
     const safeFilename = (filename || "video.mp4")
       .replace(/[\\/:*?"<>|]/g, "_")
       .trim();
@@ -140,7 +274,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       saveAs: true
     };
 
-    // Pass Referer header to prevent server anti-hotlinking 403/empty responses
     if (referer) {
       downloadOptions.headers = [
         { name: "Referer", value: referer }
@@ -161,7 +294,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ success: false, error: err.message });
     }
 
-    return true; // Asynchronous sendResponse
+    return true;
   }
 
   return true;
