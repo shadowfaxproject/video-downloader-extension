@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Main Video Downloader</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header class="app-header">
+    <div class="logo-group">
+      <div class="logo-icon">▶</div>
+      <h1>Video Downloader</h1>
+    </div>
+    <span id="status-badge" class="badge">Scanning...</span>
+  </header>
+
+  <main id="app-content">
+    <!-- State: Scanning / Loading -->
+    <div id="loading-state" class="state-view">
+      <div class="spinner"></div>
+      <p>Analyzing page for videos...</p>
+    </div>
+
+    <!-- State: No Video Detected -->
+    <div id="empty-state" class="state-view hidden">
+      <div class="empty-icon">📺</div>
+      <h2>No Video Detected</h2>
+      <p>Try playing the video on the page or refresh to trigger detection.</p>
+      <button id="refresh-btn" class="btn btn-secondary">Rescan Page</button>
+    </div>
+
+    <!-- State: Main Video Found -->
+    <div id="detected-state" class="state-view hidden">
+      <section class="main-video-card">
+        <div class="card-header">
+          <span class="label-chip">Main Video</span>
+          <span id="video-quality" class="chip">HD</span>
+        </div>
+
+        <div class="video-info">
+          <label for="filename-input">Filename</label>
+          <div class="input-group">
+            <input type="text" id="filename-input" placeholder="video.mp4">
+          </div>
+
+          <div class="metadata-row">
+            <div class="meta-item">
+              <span class="meta-label">Resolution</span>
+              <span id="meta-res" class="meta-val">--</span>
+            </div>
+            <div class="meta-item">
+              <span class="meta-label">Duration</span>
+              <span id="meta-duration" class="meta-val">--</span>
+            </div>
+            <div class="meta-item">
+              <span class="meta-label">Format</span>
+              <span id="meta-format" class="meta-val">MP4</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Progress Bar for HLS Segment Downloads -->
+        <div id="progress-container" class="progress-container hidden">
+          <div class="progress-info">
+            <span id="progress-label">Downloading stream segments...</span>
+            <span id="progress-percent">0%</span>
+          </div>
+          <div class="progress-bar-bg">
+            <div id="progress-bar-fill" class="progress-bar-fill"></div>
+          </div>
+          <span id="progress-details" class="progress-details">0 / 0 segments</span>
+        </div>
+
+        <div class="action-group">
+          <button id="download-btn" class="btn btn-primary">
+            <svg class="btn-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+              <polyline points="7 10 12 15 17 10"></polyline>
+              <line x1="12" y1="15" x2="12" y2="3"></line>
+            </svg>
+            Download Video
+          </button>
+
+          <div class="sub-actions">
+            <button id="copy-url-btn" class="btn btn-sub" title="Copy Video URL">Copy Link</button>
+            <button id="copy-ffmpeg-btn" class="btn btn-sub hidden" title="Copy ffmpeg command">Copy ffmpeg</button>
+            <button id="open-tab-btn" class="btn btn-sub" title="Open in new tab">Preview</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Optional Secondary Videos list -->
+      <section id="secondary-videos-section" class="secondary-section hidden">
+        <h3 class="secondary-title">Other Media On Page (<span id="secondary-count">0</span>)</h3>
+        <div id="secondary-list" class="secondary-list"></div>
+      </section>
+    </div>
+  </main>
+
+  <footer class="app-footer">
+    <div id="toast" class="toast hidden">Download started!</div>
+  </footer>
+
+  <script src="../hlsDownloader.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

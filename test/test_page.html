@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Test Page - Sample Video Player</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background-color: #0f172a;
+      color: #f8fafc;
+      margin: 0;
+      padding: 40px 20px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    .container {
+      max-width: 800px;
+      width: 100%;
+      background: #1e293b;
+      padding: 30px;
+      border-radius: 12px;
+      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5);
+    }
+    h1 {
+      margin-top: 0;
+      font-size: 24px;
+      color: #38bdf8;
+    }
+    p {
+      color: #94a3b8;
+      line-height: 1.6;
+    }
+    .video-wrapper {
+      margin: 24px 0;
+      position: relative;
+      border-radius: 8px;
+      overflow: hidden;
+      background: #000;
+    }
+    video {
+      width: 100%;
+      height: auto;
+      display: block;
+    }
+    .instructions {
+      background: #0f172a;
+      padding: 16px 20px;
+      border-radius: 8px;
+      border-left: 4px solid #38bdf8;
+      margin-top: 20px;
+    }
+    .instructions h3 {
+      margin-top: 0;
+      color: #f8fafc;
+    }
+    .instructions ol {
+      margin: 0;
+      padding-left: 20px;
+      color: #cbd5e1;
+    }
+    .instructions li {
+      margin-bottom: 8px;
+    }
+    code {
+      background: #1e293b;
+      padding: 2px 6px;
+      border-radius: 4px;
+      color: #38bdf8;
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Sample Video Testing Page</h1>
+    <p>
+      This page hosts a sample HTML5 video to verify that your <strong>Main Video Downloader</strong> Chrome extension detects the primary video and facilitates direct downloading.
+    </p>
+
+    <div class="video-wrapper">
+      <video id="sample-video" controls poster="https://interactive-examples.mdn.mozilla.net/media/cc0-images/surfer.jpg">
+        <!-- Working reliable remote video source -->
+        <source src="https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4" type="video/mp4">
+        <!-- Local fallback video source -->
+        <source src="sample.mp4" type="video/mp4">
+        Your browser does not support the video tag.
+      </video>
+    </div>
+
+    <h2>Test 2: HLS Stream (.m3u8 Playlist)</h2>
+    <p>
+      Many modern websites serve video as fragmented HLS (.m3u8) streams instead of single .mp4 files. 
+      The extension now automatically downloads and stitches all segments into a playable video file!
+    </p>
+
+    <div class="video-wrapper">
+      <video id="hls-video" controls poster="https://test-streams.mux.dev/x36xhzz/poster.png">
+        <source src="https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8" type="application/x-mpegURL">
+        Your browser does not support HLS streaming.
+      </video>
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+    <script>
+      if (Hls.isSupported()) {
+        const video = document.getElementById('hls-video');
+        const hls = new Hls();
+        hls.loadSource('https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8');
+        hls.attachMedia(video);
+      }
+    </script>
+
+    <div class="instructions">
+      <h3>How to Test the Extension</h3>
+      <ol>
+        <li>Open Chrome and navigate to <code>chrome://extensions</code>.</li>
+        <li>Enable <strong>Developer mode</strong> and click <strong>Reload (↻)</strong> on the extension card.</li>
+        <li>Open this page (<code>test/test_page.html</code>) in Chrome.</li>
+        <li>Play either the direct MP4 video or the HLS stream.</li>
+        <li>Click the extension icon in the toolbar.
+          <ul>
+            <li>For direct MP4: Click <strong>Download Video</strong>.</li>
+            <li>For HLS Stream (.m3u8): Click <strong>Download & Assemble Video</strong>. You will see a live progress bar as it fetches and stitches the segments into a playable video!</li>
+          </ul>
+        </li>
+      </ol>
+    </div>
+  </div>
+</body>
+</html>
