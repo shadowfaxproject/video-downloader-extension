@@ -221,6 +221,60 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse({ success: true });
   }
 
+  else if (message.type === "OFFSCREEN_BLOB_READY") {
+    const { tabId, blobUrl, filename, sizeBytes } = message;
+
+    chrome.downloads.download(
+      {
+        url: blobUrl,
+        filename: filename,
+        saveAs: true
+      },
+      (downloadId) => {
+        if (chrome.runtime.lastError) {
+          const err = chrome.runtime.lastError.message;
+          console.error("[Background] Download trigger failed:", err);
+          const job = activeHlsJobs.get(tabId);
+          if (job) {
+            job.status = "error";
+            job.error = err;
+          }
+          chrome.action.setBadgeText({ tabId, text: "ERR" }).catch(() => {});
+          chrome.action.setBadgeBackgroundColor({ tabId, color: "#EF4444" }).catch(() => {});
+          chrome.runtime.sendMessage({
+            type: "HLS_ERROR",
+            tabId,
+            error: err
+          }).catch(() => {});
+        } else {
+          const job = activeHlsJobs.get(tabId);
+          if (job) {
+            job.status = "completed";
+            job.progress.percent = 100;
+            job.sizeBytes = sizeBytes;
+          }
+          chrome.action.setBadgeText({ tabId, text: "100%" }).catch(() => {});
+          chrome.action.setBadgeBackgroundColor({ tabId, color: "#10B981" }).catch(() => {});
+
+          chrome.runtime.sendMessage({
+            type: "HLS_COMPLETED",
+            tabId,
+            filename,
+            sizeBytes
+          }).catch(() => {});
+
+          setTimeout(() => {
+            if (activeHlsJobs.get(tabId)?.status === "completed") {
+              chrome.action.setBadgeText({ tabId, text: "" }).catch(() => {});
+            }
+          }, 5000);
+        }
+
+        clearKeepAliveIfIdle();
+      }
+    );
+  }
+
   else if (message.type === "HLS_PROGRESS_UPDATE") {
     const job = activeHlsJobs.get(message.tabId);
     if (job) {

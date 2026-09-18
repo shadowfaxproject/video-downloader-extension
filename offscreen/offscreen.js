@@ -20,39 +20,25 @@ chrome.runtime.onMessage.addListener(async (message) => {
         throw new Error("Assembled video file is empty (0 bytes received).");
       }
 
-      // Native DOM URL.createObjectURL is fully supported in offscreen documents
+      // Generate Blob URL in native DOM context (available to extension origin)
       const blobUrl = URL.createObjectURL(result.blob);
       const finalFilename = filename.replace(/\.(ts|mp4|m3u8)$/i, "") + `.${result.extension}`;
 
-      chrome.downloads.download(
-        {
-          url: blobUrl,
-          filename: finalFilename,
-          saveAs: true
-        },
-        (downloadId) => {
-          if (chrome.runtime.lastError) {
-            console.error("[Offscreen] Download trigger failed:", chrome.runtime.lastError.message);
-            chrome.runtime.sendMessage({
-              type: "HLS_ERROR",
-              tabId,
-              error: chrome.runtime.lastError.message
-            }).catch(() => {});
-          } else {
-            chrome.runtime.sendMessage({
-              type: "HLS_COMPLETED",
-              tabId,
-              filename: finalFilename,
-              sizeBytes: result.sizeBytes
-            }).catch(() => {});
-          }
+      // Send blobUrl back to background service worker to trigger chrome.downloads
+      chrome.runtime.sendMessage({
+        type: "OFFSCREEN_BLOB_READY",
+        tabId,
+        blobUrl,
+        filename: finalFilename,
+        sizeBytes: result.sizeBytes
+      });
 
-          // Clean up ObjectURL after 60 seconds
-          setTimeout(() => {
-            URL.revokeObjectURL(blobUrl);
-          }, 60000);
-        }
-      );
+      // Keep blob URL alive until downloaded, clean up after 2 minutes
+      setTimeout(() => {
+        try {
+          URL.revokeObjectURL(blobUrl);
+        } catch {}
+      }, 120000);
 
     } catch (err) {
       console.error("[Offscreen HLS Download Error]:", err);
@@ -62,5 +48,9 @@ chrome.runtime.onMessage.addListener(async (message) => {
         error: err.message
       }).catch(() => {});
     }
+  } else if (message.type === "REVOKE_BLOB" && message.blobUrl) {
+    try {
+      URL.revokeObjectURL(message.blobUrl);
+    } catch {}
   }
 });
