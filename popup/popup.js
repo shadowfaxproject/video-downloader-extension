@@ -170,6 +170,26 @@ document.addEventListener("DOMContentLoaded", async () => {
       domResult = await chrome.tabs.sendMessage(activeTab.id, { type: "GET_MAIN_VIDEO" });
     } catch (err) {
       console.warn("[Popup] Content script not reachable:", err);
+      // Attempt on-demand injection of content script for valid web protocols
+      const canInject = activeTab && activeTab.url && (
+        activeTab.url.startsWith("http://") || 
+        activeTab.url.startsWith("https://") || 
+        activeTab.url.startsWith("file://")
+      );
+      if (canInject && typeof chrome !== "undefined" && chrome.scripting) {
+        try {
+          console.log("[Popup] Attempting on-demand injection of content.js on tab", activeTab.id);
+          await chrome.scripting.executeScript({
+            target: { tabId: activeTab.id },
+            files: ["content.js"]
+          });
+          // Retry sending message after successful injection
+          domResult = await chrome.tabs.sendMessage(activeTab.id, { type: "GET_MAIN_VIDEO" });
+          console.log("[Popup] Content script successfully injected on-demand, response received.");
+        } catch (injectErr) {
+          console.warn("[Popup] On-demand content script injection or communication failed:", injectErr);
+        }
+      }
     }
 
     // 2. Query network sniffed videos from background script
