@@ -1,5 +1,15 @@
 // offscreen.js - Runs in a dedicated DOM context with native URL.createObjectURL support
 
+function safeSendMessage(message) {
+  try {
+    if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.id) {
+      chrome.runtime.sendMessage(message).catch(() => {});
+    }
+  } catch (e) {
+    // Ignore "Extension context invalidated" error
+  }
+}
+
 chrome.runtime.onMessage.addListener(async (message) => {
   if (message.type === "OFFSCREEN_START_HLS") {
     const { jobId, tabId, url, filename, referer } = message;
@@ -8,13 +18,13 @@ chrome.runtime.onMessage.addListener(async (message) => {
       const result = await assembleHlsStream(url, {
         referer: referer,
         onProgress: (progress) => {
-          chrome.runtime.sendMessage({
+          safeSendMessage({
             type: "HLS_PROGRESS_UPDATE",
             jobId,
             tabId,
             url,
             progress
-          }).catch(() => {});
+          });
         }
       });
 
@@ -27,7 +37,7 @@ chrome.runtime.onMessage.addListener(async (message) => {
       const finalFilename = filename.replace(/\.(ts|mp4|m3u8)$/i, "") + `.${result.extension}`;
 
       // Send blobUrl back to background service worker to trigger chrome.downloads
-      chrome.runtime.sendMessage({
+      safeSendMessage({
         type: "OFFSCREEN_BLOB_READY",
         jobId,
         tabId,
@@ -46,13 +56,13 @@ chrome.runtime.onMessage.addListener(async (message) => {
 
     } catch (err) {
       console.error("[Offscreen HLS Download Error]:", err);
-      chrome.runtime.sendMessage({
+      safeSendMessage({
         type: "HLS_ERROR",
         jobId,
         tabId,
         url,
         error: err.message
-      }).catch(() => {});
+      });
     }
   } else if (message.type === "REVOKE_BLOB" && message.blobUrl) {
     try {
