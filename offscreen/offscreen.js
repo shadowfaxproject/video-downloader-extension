@@ -2,7 +2,7 @@
 
 chrome.runtime.onMessage.addListener(async (message) => {
   if (message.type === "OFFSCREEN_START_HLS") {
-    const { tabId, url, filename, referer } = message;
+    const { jobId, tabId, url, filename, referer } = message;
 
     try {
       const result = await assembleHlsStream(url, {
@@ -10,7 +10,9 @@ chrome.runtime.onMessage.addListener(async (message) => {
         onProgress: (progress) => {
           chrome.runtime.sendMessage({
             type: "HLS_PROGRESS_UPDATE",
+            jobId,
             tabId,
+            url,
             progress
           }).catch(() => {});
         }
@@ -27,7 +29,9 @@ chrome.runtime.onMessage.addListener(async (message) => {
       // Send blobUrl back to background service worker to trigger chrome.downloads
       chrome.runtime.sendMessage({
         type: "OFFSCREEN_BLOB_READY",
+        jobId,
         tabId,
+        url,
         blobUrl,
         filename: finalFilename,
         sizeBytes: result.sizeBytes
@@ -44,7 +48,9 @@ chrome.runtime.onMessage.addListener(async (message) => {
       console.error("[Offscreen HLS Download Error]:", err);
       chrome.runtime.sendMessage({
         type: "HLS_ERROR",
+        jobId,
         tabId,
+        url,
         error: err.message
       }).catch(() => {});
     }
