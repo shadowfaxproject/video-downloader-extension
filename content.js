@@ -1,9 +1,6 @@
 // content.js - Primary video detector (does not alter right-click behavior)
 
 (() => {
-  if (window.__mainVideoDownloaderInjected) return;
-  window.__mainVideoDownloaderInjected = true;
-
   /**
    * Evaluates all <video> elements on the page and selects the primary / main video.
    */
@@ -104,27 +101,15 @@
     };
   }
 
-  function safeSendMessage(message) {
-    try {
-      if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.id) {
-        // Trigger synchronous invalidation check
-        chrome.runtime.getManifest();
-        chrome.runtime.sendMessage(message).catch(() => {});
-      }
-    } catch (e) {
-      // Ignore "Extension context invalidated" error
-    }
-  }
-
   // Notify background script when any video begins playing
   document.addEventListener("play", (event) => {
     if (event.target && event.target.tagName === "VIDEO") {
       const result = detectVideos();
       if (result.mainVideo) {
-        safeSendMessage({
+        chrome.runtime.sendMessage({
           type: "VIDEO_DETECTED",
           data: result
-        });
+        }).catch(() => {});
       }
     }
   }, true);
@@ -142,10 +127,10 @@
   setTimeout(() => {
     const result = detectVideos();
     if (result.mainVideo) {
-      safeSendMessage({
+      chrome.runtime.sendMessage({
         type: "VIDEO_DETECTED",
         data: result
-      });
+      }).catch(() => {});
     }
   }, 1000);
 })();
