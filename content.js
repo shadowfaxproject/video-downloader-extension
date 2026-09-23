@@ -1,6 +1,9 @@
 // content.js - Primary video detector (does not alter right-click behavior)
 
 (() => {
+  if (window.__mainVideoDownloaderInjected) return;
+  window.__mainVideoDownloaderInjected = true;
+
   /**
    * Evaluates all <video> elements on the page and selects the primary / main video.
    */
