@@ -101,15 +101,25 @@
     };
   }
 
+  function safeSendMessage(message) {
+    try {
+      if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.id) {
+        chrome.runtime.sendMessage(message).catch(() => {});
+      }
+    } catch (e) {
+      // Ignore "Extension context invalidated" error
+    }
+  }
+
   // Notify background script when any video begins playing
   document.addEventListener("play", (event) => {
     if (event.target && event.target.tagName === "VIDEO") {
       const result = detectVideos();
       if (result.mainVideo) {
-        chrome.runtime.sendMessage({
+        safeSendMessage({
           type: "VIDEO_DETECTED",
           data: result
-        }).catch(() => {});
+        });
       }
     }
   }, true);
@@ -127,10 +137,10 @@
   setTimeout(() => {
     const result = detectVideos();
     if (result.mainVideo) {
-      chrome.runtime.sendMessage({
+      safeSendMessage({
         type: "VIDEO_DETECTED",
         data: result
-      }).catch(() => {});
+      });
     }
   }, 1000);
 })();

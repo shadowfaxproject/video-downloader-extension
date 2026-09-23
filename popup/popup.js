@@ -336,21 +336,29 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   function triggerDirectDownload(url, filename) {
     showToast("Starting download...");
-    chrome.runtime.sendMessage(
-      {
-        type: "DOWNLOAD_VIDEO",
-        url: url,
-        filename: filename,
-        referer: activeTab ? activeTab.url : null
-      },
-      (response) => {
-        if (response && response.success) {
-          showToast("Download launched in Chrome!");
-        } else {
-          showToast(response?.error || "Download failed. Check connection.", true);
-        }
+    try {
+      if (chrome.runtime && chrome.runtime.id) {
+        chrome.runtime.sendMessage(
+          {
+            type: "DOWNLOAD_VIDEO",
+            url: url,
+            filename: filename,
+            referer: activeTab ? activeTab.url : null
+          },
+          (response) => {
+            if (response && response.success) {
+              showToast("Download launched in Chrome!");
+            } else {
+              showToast(response?.error || "Download failed. Check connection.", true);
+            }
+          }
+        );
+      } else {
+        showToast("Extension context invalidated. Please reload the page.", true);
       }
-    );
+    } catch (err) {
+      showToast("Extension context invalidated. Please reload the page.", true);
+    }
   }
 
   // Hand off HLS stream assembly to persistent background service worker
@@ -368,27 +376,35 @@ document.addEventListener("DOMContentLoaded", async () => {
     activeHlsUrl = m3u8Url;
     activeHlsJobId = null;
 
-    chrome.runtime.sendMessage(
-      {
-        type: "START_HLS_DOWNLOAD",
-        tabId: activeTab.id,
-        url: m3u8Url,
-        filename: targetFilename,
-        referer: activeTab ? activeTab.url : null
-      },
-      (response) => {
-        if (chrome.runtime.lastError) {
-          showToast("Could not start background job: " + chrome.runtime.lastError.message, true);
-          // Only enable the main button if we were trying to download the main video
-          if (activeVideo && m3u8Url === activeVideo.url) {
-            downloadBtn.disabled = false;
-            downloadBtn.style.opacity = "1";
+    try {
+      if (chrome.runtime && chrome.runtime.id) {
+        chrome.runtime.sendMessage(
+          {
+            type: "START_HLS_DOWNLOAD",
+            tabId: activeTab.id,
+            url: m3u8Url,
+            filename: targetFilename,
+            referer: activeTab ? activeTab.url : null
+          },
+          (response) => {
+            if (chrome.runtime.lastError) {
+              showToast("Could not start background job: " + chrome.runtime.lastError.message, true);
+              // Only enable the main button if we were trying to download the main video
+              if (activeVideo && m3u8Url === activeVideo.url) {
+                downloadBtn.disabled = false;
+                downloadBtn.style.opacity = "1";
+              }
+            } else if (response && response.success) {
+              activeHlsJobId = response.jobId;
+            }
           }
-        } else if (response && response.success) {
-          activeHlsJobId = response.jobId;
-        }
+        );
+      } else {
+        showToast("Extension context invalidated. Please reload the page.", true);
       }
-    );
+    } catch (err) {
+      showToast("Extension context invalidated. Please reload the page.", true);
+    }
   }
 
   // Action listeners
