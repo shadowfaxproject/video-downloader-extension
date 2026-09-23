@@ -104,6 +104,8 @@
   function safeSendMessage(message) {
     try {
       if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.id) {
+        // Trigger synchronous invalidation check
+        chrome.runtime.getManifest();
         chrome.runtime.sendMessage(message).catch(() => {});
       }
     } catch (e) {

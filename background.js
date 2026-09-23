@@ -136,7 +136,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status === "loading") {
     tabMediaMap.delete(tabId);
     for (const [jobId, job] of activeHlsJobs.entries()) {
-      if (job.tabId === tabId) {
+      if (job.tabId === tabId && job.status !== "downloading") {
         activeHlsJobs.delete(jobId);
       }
     }
@@ -148,7 +148,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 chrome.tabs.onRemoved.addListener((tabId) => {
   tabMediaMap.delete(tabId);
   for (const [jobId, job] of activeHlsJobs.entries()) {
-    if (job.tabId === tabId) {
+    if (job.tabId === tabId && job.status !== "downloading") {
       activeHlsJobs.delete(jobId);
     }
   }
@@ -278,6 +278,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             url,
             error: err
           }).catch(() => {});
+
+          chrome.tabs.get(tabId, (tab) => {
+            if (chrome.runtime.lastError || !tab) {
+              activeHlsJobs.delete(jobId);
+            }
+          });
         } else {
           const job = activeHlsJobs.get(jobId);
           if (job) {
@@ -296,6 +302,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             filename,
             sizeBytes
           }).catch(() => {});
+
+          chrome.tabs.get(tabId, (tab) => {
+            if (chrome.runtime.lastError || !tab) {
+              activeHlsJobs.delete(jobId);
+            }
+          });
 
           setTimeout(() => {
             if (activeHlsJobs.get(jobId)?.status === "completed") {
@@ -344,6 +356,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
     }, 5000);
 
+    chrome.tabs.get(message.tabId, (tab) => {
+      if (chrome.runtime.lastError || !tab) {
+        activeHlsJobs.delete(message.jobId);
+      }
+    });
+
     clearKeepAliveIfIdle();
   }
 
@@ -355,6 +373,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     chrome.action.setBadgeText({ tabId: message.tabId, text: "ERR" }).catch(() => {});
     chrome.action.setBadgeBackgroundColor({ tabId: message.tabId, color: "#EF4444" }).catch(() => {});
+
+    chrome.tabs.get(message.tabId, (tab) => {
+      if (chrome.runtime.lastError || !tab) {
+        activeHlsJobs.delete(message.jobId);
+      }
+    });
+
     clearKeepAliveIfIdle();
   }
 
