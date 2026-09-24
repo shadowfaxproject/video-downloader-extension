@@ -3,7 +3,7 @@
 // Tab-based cache of detected media streams: tabId -> Map(url -> mediaItem)
 const tabMediaMap = new Map();
 
-// Active HLS background download jobs: tabId -> job state
+// Active HLS background download jobs: jobId -> job state
 const activeHlsJobs = new Map();
 
 // Regex matching direct video file formats
@@ -135,7 +135,11 @@ chrome.webRequest.onHeadersReceived.addListener(
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status === "loading") {
     tabMediaMap.delete(tabId);
-    activeHlsJobs.delete(tabId);
+    for (const [jobId, job] of activeHlsJobs.entries()) {
+      if (job.tabId === tabId) {
+        activeHlsJobs.delete(jobId);
+      }
+    }
     chrome.action.setBadgeText({ tabId: tabId, text: "" }).catch(() => {});
   }
 });
@@ -143,7 +147,11 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 // Clean up cache when tab is closed
 chrome.tabs.onRemoved.addListener((tabId) => {
   tabMediaMap.delete(tabId);
-  activeHlsJobs.delete(tabId);
+  for (const [jobId, job] of activeHlsJobs.entries()) {
+    if (job.tabId === tabId) {
+      activeHlsJobs.delete(jobId);
+    }
+  }
 });
 
 // Message listener
@@ -152,7 +160,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.type === "VIDEO_DETECTED") {
     const targetTabId = tabId || message.tabId;
-    const activeJob = activeHlsJobs.get(targetTabId);
+    const activeJob = Array.from(activeHlsJobs.values()).find(
+      j => j.tabId === targetTabId && j.status === "downloading"
+    );
     if (targetTabId && (!activeJob || activeJob.status !== "downloading")) {
       chrome.action.setBadgeText({ tabId: targetTabId, text: "1" }).catch(() => {});
       chrome.action.setBadgeBackgroundColor({ tabId: targetTabId, color: "#2563EB" }).catch(() => {});
@@ -178,14 +188,33 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   else if (message.type === "GET_HLS_STATUS") {
     const requestedTabId = message.tabId;
-    const job = activeHlsJobs.get(requestedTabId) || null;
+    const url = message.url;
+    let job = null;
+    if (url) {
+      job = Array.from(activeHlsJobs.values())
+        .filter(j => j.tabId === requestedTabId && j.url === url)
+        .sort((a, b) => b.startedAt - a.startedAt)[0] || null;
+    } else {
+      job = Array.from(activeHlsJobs.values())
+        .filter(j => j.tabId === requestedTabId && j.status === "downloading")
+        .sort((a, b) => b.startedAt - a.startedAt)[0] || null;
+      if (!job) {
+        job = Array.from(activeHlsJobs.values())
+          .filter(j => j.tabId === requestedTabId)
+          .sort((a, b) => b.startedAt - a.startedAt)[0] || null;
+      }
+    }
     sendResponse({ job });
   }
 
   else if (message.type === "START_HLS_DOWNLOAD") {
     const { url, filename, referer, tabId: requestedTabId } = message;
+    const jobId = typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `${requestedTabId}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
     const job = {
+      jobId,
       tabId: requestedTabId,
       url,
       filename,
@@ -194,7 +223,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       error: null,
       startedAt: Date.now()
     };
-    activeHlsJobs.set(requestedTabId, job);
+    activeHlsJobs.set(jobId, job);
     ensureKeepAlive();
 
     chrome.action.setBadgeText({ tabId: requestedTabId, text: "0%" }).catch(() => {});
@@ -204,6 +233,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     ensureOffscreenDocument().then(() => {
       chrome.runtime.sendMessage({
         type: "OFFSCREEN_START_HLS",
+        jobId,
         tabId: requestedTabId,
         url,
         filename,
@@ -218,11 +248,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       clearKeepAliveIfIdle();
     });
 
-    sendResponse({ success: true });
+    sendResponse({ success: true, jobId });
   }
 
   else if (message.type === "OFFSCREEN_BLOB_READY") {
-    const { tabId, blobUrl, filename, sizeBytes } = message;
+    const { jobId, tabId, url, blobUrl, filename, sizeBytes } = message;
 
     chrome.downloads.download(
       {
@@ -234,7 +264,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (chrome.runtime.lastError) {
           const err = chrome.runtime.lastError.message;
           console.error("[Background] Download trigger failed:", err);
-          const job = activeHlsJobs.get(tabId);
+          const job = activeHlsJobs.get(jobId);
           if (job) {
             job.status = "error";
             job.error = err;
@@ -243,11 +273,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           chrome.action.setBadgeBackgroundColor({ tabId, color: "#EF4444" }).catch(() => {});
           chrome.runtime.sendMessage({
             type: "HLS_ERROR",
+            jobId,
             tabId,
+            url,
             error: err
           }).catch(() => {});
         } else {
-          const job = activeHlsJobs.get(tabId);
+          const job = activeHlsJobs.get(jobId);
           if (job) {
             job.status = "completed";
             job.progress.percent = 100;
@@ -258,14 +290,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
           chrome.runtime.sendMessage({
             type: "HLS_COMPLETED",
+            jobId,
             tabId,
+            url,
             filename,
             sizeBytes
           }).catch(() => {});
 
           setTimeout(() => {
-            if (activeHlsJobs.get(tabId)?.status === "completed") {
-              chrome.action.setBadgeText({ tabId, text: "" }).catch(() => {});
+            if (activeHlsJobs.get(jobId)?.status === "completed") {
+              const hasActiveOnTab = Array.from(activeHlsJobs.values()).some(
+                j => j.tabId === tabId && j.status === "downloading"
+              );
+              if (!hasActiveOnTab) {
+                chrome.action.setBadgeText({ tabId, text: "" }).catch(() => {});
+              }
             }
           }, 5000);
         }
@@ -276,7 +315,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   else if (message.type === "HLS_PROGRESS_UPDATE") {
-    const job = activeHlsJobs.get(message.tabId);
+    const job = activeHlsJobs.get(message.jobId);
     if (job) {
       job.progress = message.progress;
       const pctText = `${message.progress.percent}%`;
@@ -285,7 +324,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   else if (message.type === "HLS_COMPLETED") {
-    const job = activeHlsJobs.get(message.tabId);
+    const job = activeHlsJobs.get(message.jobId);
     if (job) {
       job.status = "completed";
       job.progress.percent = 100;
@@ -295,8 +334,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     chrome.action.setBadgeBackgroundColor({ tabId: message.tabId, color: "#10B981" }).catch(() => {});
 
     setTimeout(() => {
-      if (activeHlsJobs.get(message.tabId)?.status === "completed") {
-        chrome.action.setBadgeText({ tabId: message.tabId, text: "" }).catch(() => {});
+      if (activeHlsJobs.get(message.jobId)?.status === "completed") {
+        const hasActiveOnTab = Array.from(activeHlsJobs.values()).some(
+          j => j.tabId === message.tabId && j.status === "downloading"
+        );
+        if (!hasActiveOnTab) {
+          chrome.action.setBadgeText({ tabId: message.tabId, text: "" }).catch(() => {});
+        }
       }
     }, 5000);
 
@@ -304,7 +348,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   else if (message.type === "HLS_ERROR") {
-    const job = activeHlsJobs.get(message.tabId);
+    const job = activeHlsJobs.get(message.jobId);
     if (job) {
       job.status = "error";
       job.error = message.error;
