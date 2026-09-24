@@ -31,6 +31,8 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   let activeVideo = null;
   let activeTab = null;
+  let activeHlsUrl = null;
+  let activeHlsJobId = null;
 
   function showToast(message, isError = false) {
     toast.textContent = message;
@@ -97,6 +99,13 @@ document.addEventListener("DOMContentLoaded", async () => {
   chrome.runtime.onMessage.addListener((msg) => {
     if (!activeTab || msg.tabId !== activeTab.id) return;
 
+    // Filter messages to ensure they match our active downloading job
+    const isMatch = (activeHlsJobId && msg.jobId)
+      ? (msg.jobId === activeHlsJobId)
+      : (msg.url === activeHlsUrl);
+
+    if (!isMatch) return;
+
     if (msg.type === "HLS_PROGRESS_UPDATE") {
       updateProgressUI(msg.progress);
     } else if (msg.type === "HLS_COMPLETED") {
@@ -104,14 +113,19 @@ document.addEventListener("DOMContentLoaded", async () => {
       progressPercent.textContent = "100%";
       progressBarFill.style.width = "100%";
       progressDetails.textContent = `Saved: ${formatBytes(msg.sizeBytes)}`;
-      downloadBtn.disabled = false;
-      downloadBtn.style.opacity = "1";
+      // Only enable the main download button if this was the main video
+      if (activeVideo && msg.url === activeVideo.url) {
+        downloadBtn.disabled = false;
+        downloadBtn.style.opacity = "1";
+      }
       showToast("Download finished and saved to Downloads folder!");
     } else if (msg.type === "HLS_ERROR") {
       progressLabel.textContent = "Download failed.";
       progressDetails.textContent = msg.error;
-      downloadBtn.disabled = false;
-      downloadBtn.style.opacity = "1";
+      if (activeVideo && msg.url === activeVideo.url) {
+        downloadBtn.disabled = false;
+        downloadBtn.style.opacity = "1";
+      }
       showToast("Download error: " + msg.error, true);
     }
   });
@@ -140,6 +154,8 @@ document.addEventListener("DOMContentLoaded", async () => {
         tabId: activeTab.id
       });
       if (statusRes?.job && statusRes.job.status === "downloading") {
+        activeHlsUrl = statusRes.job.url;
+        activeHlsJobId = statusRes.job.jobId;
         updateProgressUI(statusRes.job.progress);
         downloadBtn.disabled = true;
         downloadBtn.style.opacity = "0.7";
@@ -268,6 +284,9 @@ document.addEventListener("DOMContentLoaded", async () => {
       downloadBtn.disabled = true;
       downloadBtn.style.opacity = "0.6";
       showToast("Play the video for a few seconds to capture the stream.", true);
+    } else if (activeHlsUrl && activeHlsUrl !== activeVideo.url) {
+      downloadBtn.disabled = false;
+      downloadBtn.style.opacity = "1";
     }
 
     // Render secondary videos
@@ -346,6 +365,9 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     showToast("Download running in background! Safe to switch windows or apps.");
 
+    activeHlsUrl = m3u8Url;
+    activeHlsJobId = null;
+
     chrome.runtime.sendMessage(
       {
         type: "START_HLS_DOWNLOAD",
@@ -357,8 +379,13 @@ document.addEventListener("DOMContentLoaded", async () => {
       (response) => {
         if (chrome.runtime.lastError) {
           showToast("Could not start background job: " + chrome.runtime.lastError.message, true);
-          downloadBtn.disabled = false;
-          downloadBtn.style.opacity = "1";
+          // Only enable the main button if we were trying to download the main video
+          if (activeVideo && m3u8Url === activeVideo.url) {
+            downloadBtn.disabled = false;
+            downloadBtn.style.opacity = "1";
+          }
+        } else if (response && response.success) {
+          activeHlsJobId = response.jobId;
         }
       }
     );
