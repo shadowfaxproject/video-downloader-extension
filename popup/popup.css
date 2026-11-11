@@ -254,7 +254,13 @@ p {
   display: block;
   font-size: 10px;
   color: var(--text-muted);
-  text-align: right;
+}
+
+.progress-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 6px;
 }
 
 /* Buttons */
@@ -353,6 +359,20 @@ p {
 .btn-mini {
   padding: 3px 8px;
   font-size: 10px;
+}
+
+.btn-danger {
+  background: #dc2626;
+  color: white;
+}
+
+.btn-danger:hover {
+  background: #b91c1c;
+}
+
+.btn-danger:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 /* Toast */

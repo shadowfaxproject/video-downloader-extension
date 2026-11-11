@@ -18,6 +18,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   const progressPercent = document.getElementById("progress-percent");
   const progressBarFill = document.getElementById("progress-bar-fill");
   const progressDetails = document.getElementById("progress-details");
+  const cancelDownloadBtn = document.getElementById("cancel-download-btn");
 
   const downloadBtn = document.getElementById("download-btn");
   const copyUrlBtn = document.getElementById("copy-url-btn");
@@ -31,6 +32,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   let activeVideo = null;
   let activeTab = null;
+  let activeDownloadId = null;
 
   function showToast(message, isError = false) {
     toast.textContent = message;
@@ -61,7 +63,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   function getFileExtension(url, isHls = false) {
-    if (isHls) return "TS";
+    if (isHls) return "mp4";
     try {
       const pathname = new URL(url).pathname;
       const match = pathname.match(/\.(mp4|webm|mkv|mov|m4v)(\?.*)?$/i);
@@ -79,8 +81,29 @@ document.addEventListener("DOMContentLoaded", async () => {
     return `${clean}.${ext.toLowerCase()}`;
   }
 
+  function resetProgressUI() {
+    progressContainer.classList.add("hidden");
+    progressBarFill.style.width = "0%";
+    progressPercent.textContent = "0%";
+    progressLabel.textContent = "Downloading...";
+    progressDetails.textContent = "";
+    downloadBtn.disabled = false;
+    downloadBtn.style.opacity = "1";
+    if (cancelDownloadBtn) {
+      cancelDownloadBtn.classList.remove("hidden");
+      cancelDownloadBtn.disabled = false;
+      cancelDownloadBtn.textContent = "Cancel";
+    }
+    activeDownloadId = null;
+  }
+
   function updateProgressUI(progress) {
     progressContainer.classList.remove("hidden");
+    if (cancelDownloadBtn) {
+      cancelDownloadBtn.classList.remove("hidden");
+      cancelDownloadBtn.disabled = false;
+      cancelDownloadBtn.textContent = "Cancel";
+    }
     const pct = `${progress.percent}%`;
     progressPercent.textContent = pct;
     progressBarFill.style.width = pct;
@@ -95,7 +118,12 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // Listen for real-time progress broadcasted by background service worker
   chrome.runtime.onMessage.addListener((msg) => {
-    if (!activeTab || msg.tabId !== activeTab.id) return;
+    if (!activeTab) return;
+    if (activeDownloadId) {
+      if (msg.downloadId && msg.downloadId !== activeDownloadId) return;
+    } else if (msg.tabId && msg.tabId !== activeTab.id) {
+      return;
+    }
 
     if (msg.type === "HLS_PROGRESS_UPDATE") {
       updateProgressUI(msg.progress);
@@ -106,13 +134,24 @@ document.addEventListener("DOMContentLoaded", async () => {
       progressDetails.textContent = `Saved: ${formatBytes(msg.sizeBytes)}`;
       downloadBtn.disabled = false;
       downloadBtn.style.opacity = "1";
+      if (cancelDownloadBtn) cancelDownloadBtn.classList.add("hidden");
+      activeDownloadId = null;
       showToast("Download finished and saved to Downloads folder!");
+      setTimeout(() => {
+        progressContainer.classList.add("hidden");
+        if (cancelDownloadBtn) cancelDownloadBtn.classList.remove("hidden");
+      }, 5000);
     } else if (msg.type === "HLS_ERROR") {
       progressLabel.textContent = "Download failed.";
       progressDetails.textContent = msg.error;
       downloadBtn.disabled = false;
       downloadBtn.style.opacity = "1";
+      if (cancelDownloadBtn) cancelDownloadBtn.classList.add("hidden");
+      activeDownloadId = null;
       showToast("Download error: " + msg.error, true);
+    } else if (msg.type === "HLS_CANCELLED" || msg.type === "DOWNLOAD_CANCELLED") {
+      resetProgressUI();
+      showToast("Download cancelled.");
     }
   });
 
@@ -136,11 +175,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     // Check if background worker is already downloading on this tab
     try {
       const statusRes = await chrome.runtime.sendMessage({
-        type: "GET_HLS_STATUS",
+        type: "GET_ALL_JOBS",
         tabId: activeTab.id
       });
-      if (statusRes?.job && statusRes.job.status === "downloading") {
-        updateProgressUI(statusRes.job.progress);
+      const downloadingJob = statusRes?.jobs?.find(j => j.status === "downloading");
+      if (downloadingJob) {
+        activeDownloadId = downloadingJob.downloadId;
+        updateProgressUI(downloadingJob.progress);
         downloadBtn.disabled = true;
         downloadBtn.style.opacity = "0.7";
       }
@@ -156,16 +197,28 @@ document.addEventListener("DOMContentLoaded", async () => {
       console.warn("[Popup] Content script not reachable:", err);
     }
 
-    // 2. Query network sniffed videos from background script
+    // 2. Query network sniffed videos from background script.
+    // The player may not have fired its first stream request yet (e.g. popup
+    // opened right as playback starts), so retry briefly before giving up —
+    // otherwise a real stream that just hasn't been sniffed yet looks like none exists.
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
     let networkVideos = [];
-    try {
-      const netResult = await chrome.runtime.sendMessage({
-        type: "GET_NETWORK_VIDEOS",
-        tabId: activeTab.id
-      });
-      networkVideos = netResult?.videos || [];
-    } catch (err) {
-      console.warn("[Popup] Could not query background script:", err);
+    const domHasOnlyBlob = domResult?.mainVideo && !domResult.mainVideo.directUrl;
+    const maxAttempts = domHasOnlyBlob ? 5 : 1;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        const netResult = await chrome.runtime.sendMessage({
+          type: "GET_NETWORK_VIDEOS",
+          tabId: activeTab.id
+        });
+        networkVideos = netResult?.videos || [];
+      } catch (err) {
+        console.warn("[Popup] Could not query background script:", err);
+      }
+      if (networkVideos.length > 0 || attempt === maxAttempts - 1) break;
+      statusBadge.textContent = "Waiting for stream...";
+      await sleep(600);
     }
 
     loadingState.classList.add("hidden");
@@ -224,7 +277,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     detectedState.classList.remove("hidden");
 
     const isHls = activeVideo.isHls;
-    const ext = isHls ? "ts" : getFileExtension(activeVideo.url).toLowerCase();
+    const ext = isHls ? "mp4" : getFileExtension(activeVideo.url).toLowerCase();
 
     metaFormat.textContent = isHls ? "HLS Stream" : ext.toUpperCase();
     filenameInput.value = sanitizeFilename(activeVideo.pageTitle, ext);
@@ -300,7 +353,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         dlBtn.textContent = vid.isHls ? "Assemble" : "Download";
         dlBtn.addEventListener("click", () => {
           if (vid.isHls) {
-            startHlsBackgroundDownload(vid.url, `video_${idx + 2}.ts`);
+            startHlsBackgroundDownload(vid.url, `video_${idx + 2}.mp4`);
           } else {
             triggerDirectDownload(vid.url, sanitizeFilename(`video_${idx + 2}`, vidExt));
           }
@@ -322,10 +375,12 @@ document.addEventListener("DOMContentLoaded", async () => {
         type: "DOWNLOAD_VIDEO",
         url: url,
         filename: filename,
-        referer: activeTab ? activeTab.url : null
+        referer: activeTab ? activeTab.url : null,
+        tabId: activeTab ? activeTab.id : null
       },
       (response) => {
         if (response && response.success) {
+          activeDownloadId = response.downloadId;
           showToast("Download launched in Chrome!");
         } else {
           showToast(response?.error || "Download failed. Check connection.", true);
@@ -336,9 +391,15 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // Hand off HLS stream assembly to persistent background service worker
   function startHlsBackgroundDownload(m3u8Url, targetFilename) {
+    console.log("[Popup] startHlsBackgroundDownload url:", m3u8Url, "filename:", targetFilename);
     downloadBtn.disabled = true;
     downloadBtn.style.opacity = "0.7";
     progressContainer.classList.remove("hidden");
+    if (cancelDownloadBtn) {
+      cancelDownloadBtn.classList.remove("hidden");
+      cancelDownloadBtn.disabled = false;
+      cancelDownloadBtn.textContent = "Cancel";
+    }
     progressLabel.textContent = "Starting background download...";
     progressPercent.textContent = "0%";
     progressBarFill.style.width = "0%";
@@ -359,15 +420,46 @@ document.addEventListener("DOMContentLoaded", async () => {
           showToast("Could not start background job: " + chrome.runtime.lastError.message, true);
           downloadBtn.disabled = false;
           downloadBtn.style.opacity = "1";
+          return;
+        }
+        if (response?.success) {
+          activeDownloadId = response.downloadId;
+        } else {
+          showToast(response?.error || "Could not start background job.", true);
+          downloadBtn.disabled = false;
+          downloadBtn.style.opacity = "1";
         }
       }
     );
+  }
+
+  // Cancel button listener
+  if (cancelDownloadBtn) {
+    cancelDownloadBtn.addEventListener("click", () => {
+      if (!activeTab) return;
+      cancelDownloadBtn.disabled = true;
+      cancelDownloadBtn.textContent = "Cancelling...";
+      progressLabel.textContent = "Cancelling download...";
+
+      chrome.runtime.sendMessage(
+        {
+          type: "CANCEL_DOWNLOAD",
+          downloadId: activeDownloadId,
+          tabId: activeTab.id
+        },
+        () => {
+          resetProgressUI();
+          showToast("Download cancelled.");
+        }
+      );
+    });
   }
 
   // Action listeners
   downloadBtn.addEventListener("click", () => {
     if (!activeVideo || !activeVideo.url) return;
     const filename = filenameInput.value.trim() || "video.mp4";
+    console.log("[Popup] Download clicked. isHls:", activeVideo.isHls, "filename:", filename, "url:", activeVideo.url);
 
     if (activeVideo.isHls) {
       startHlsBackgroundDownload(activeVideo.url, filename);

@@ -3,12 +3,17 @@
 /**
  * Downloads and assembles an HLS stream into a single playable video Blob (.ts or .mp4)
  * @param {string} m3u8Url - The URL of the master or media playlist
- * @param {Object} options - { onProgress, referer }
+ * @param {Object} options - { onProgress, referer, signal }
  * @returns {Promise<{ blob: Blob, extension: string, sizeBytes: number }>}
  */
 async function assembleHlsStream(m3u8Url, options = {}) {
   const onProgress = options.onProgress || (() => {});
   const referer = options.referer || null;
+  const signal = options.signal || null;
+
+  if (signal && signal.aborted) {
+    throw new DOMException("Download cancelled by user", "AbortError");
+  }
 
   const fetchOptions = {
     mode: "cors",
@@ -16,6 +21,9 @@ async function assembleHlsStream(m3u8Url, options = {}) {
   };
   if (referer) {
     fetchOptions.referrer = referer;
+  }
+  if (signal) {
+    fetchOptions.signal = signal;
   }
 
   // 1. Fetch manifest
@@ -28,15 +36,17 @@ async function assembleHlsStream(m3u8Url, options = {}) {
   let mediaPlaylistUrl = m3u8Url;
   let mediaText = playlistText;
 
-  // 2. Handle Master Playlist: select variant with highest bandwidth / resolution
+  // 2. Handle Master Playlist: select variant with highest resolution (fallback: bandwidth)
   if (playlistText.includes("#EXT-X-STREAM-INF")) {
     const lines = playlistText.split("\n");
-    let maxBandwidth = -1;
+    let bestScore = -1;
+    let bestHasResolution = false;
     let selectedUri = null;
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i].trim();
       if (line.startsWith("#EXT-X-STREAM-INF")) {
+        const resMatch = line.match(/RESOLUTION=(\d+)x(\d+)/i);
         const bwMatch = line.match(/BANDWIDTH=(\d+)/);
         const bw = bwMatch ? parseInt(bwMatch[1], 10) : 0;
 
@@ -44,9 +54,19 @@ async function assembleHlsStream(m3u8Url, options = {}) {
         while (j < lines.length && (!lines[j].trim() || lines[j].trim().startsWith("#"))) {
           j++;
         }
-        if (j < lines.length && bw > maxBandwidth) {
-          maxBandwidth = bw;
-          selectedUri = lines[j].trim();
+        if (j >= lines.length) continue;
+        const uri = lines[j].trim();
+
+        if (resMatch) {
+          const area = parseInt(resMatch[1], 10) * parseInt(resMatch[2], 10);
+          if (!bestHasResolution || area > bestScore) {
+            bestScore = area;
+            bestHasResolution = true;
+            selectedUri = uri;
+          }
+        } else if (!bestHasResolution && bw > bestScore) {
+          bestScore = bw;
+          selectedUri = uri;
         }
       }
     }
@@ -113,6 +133,9 @@ async function assembleHlsStream(m3u8Url, options = {}) {
   // 4. Fetch encryption key if needed
   let cryptoKey = null;
   if (keyInfo) {
+    if (signal && signal.aborted) {
+      throw new DOMException("Download cancelled by user", "AbortError");
+    }
     const keyRes = await fetch(keyInfo.url, fetchOptions);
     if (!keyRes.ok) {
       throw new Error(`Failed to fetch decryption key (HTTP ${keyRes.status})`);
@@ -130,6 +153,9 @@ async function assembleHlsStream(m3u8Url, options = {}) {
   // 5. Download Init Segment if present
   const chunks = [];
   if (initSegmentUrl) {
+    if (signal && signal.aborted) {
+      throw new DOMException("Download cancelled by user", "AbortError");
+    }
     onProgress({ current: 0, total: segmentUrls.length, percent: 0, stage: "init" });
     const initRes = await fetch(initSegmentUrl, fetchOptions);
     if (!initRes.ok) {
@@ -151,6 +177,9 @@ async function assembleHlsStream(m3u8Url, options = {}) {
 
   async function worker() {
     while (queueIndex < total) {
+      if (signal && signal.aborted) {
+        throw new DOMException("Download cancelled by user", "AbortError");
+      }
       const idx = queueIndex++;
       const url = segmentUrls[idx];
 
@@ -158,6 +187,9 @@ async function assembleHlsStream(m3u8Url, options = {}) {
       let success = false;
 
       while (!success && attempts < 3) {
+        if (signal && signal.aborted) {
+          throw new DOMException("Download cancelled by user", "AbortError");
+        }
         try {
           attempts++;
           const segRes = await fetch(url, fetchOptions);
@@ -166,6 +198,10 @@ async function assembleHlsStream(m3u8Url, options = {}) {
 
           if (buffer.byteLength === 0) {
             throw new Error("Received 0 bytes from segment");
+          }
+
+          if (signal && signal.aborted) {
+            throw new DOMException("Download cancelled by user", "AbortError");
           }
 
           // Decrypt if AES-128
@@ -180,6 +216,10 @@ async function assembleHlsStream(m3u8Url, options = {}) {
               view.setUint32(12, idx);
             }
             buffer = await crypto.subtle.decrypt({ name: "AES-CBC", iv }, cryptoKey, buffer);
+          }
+
+          if (signal && signal.aborted) {
+            throw new DOMException("Download cancelled by user", "AbortError");
           }
 
           downloadedBuffers[idx] = buffer;
@@ -197,6 +237,9 @@ async function assembleHlsStream(m3u8Url, options = {}) {
             bytes: totalBytes
           });
         } catch (err) {
+          if (err.name === "AbortError" || (signal && signal.aborted)) {
+            throw err;
+          }
           lastError = err;
           if (attempts >= 3) {
             console.error(`Failed to download segment ${idx}:`, err.message);
@@ -215,6 +258,10 @@ async function assembleHlsStream(m3u8Url, options = {}) {
     workers.push(worker());
   }
   await Promise.all(workers);
+
+  if (signal && signal.aborted) {
+    throw new DOMException("Download cancelled by user", "AbortError");
+  }
 
   // STRICT VALIDATION: Do not allow empty files
   if (successfulSegments === 0 || totalBytes === 0) {

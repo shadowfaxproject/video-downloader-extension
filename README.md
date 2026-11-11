@@ -25,6 +25,10 @@ A lightweight, high-performance Chrome Extension that intelligently detects the 
   - Automatically captures and attaches the host webpage's `Referer` header to direct downloads and segment requests, preventing CDN 403 Forbidden errors and 0-byte responses.
 - 🚫 **Zero-Byte Download Guard**:
   - Rejects empty server responses and ensures files are fully validated before writing to disk.
+- 🛑 **Mid-Download Cancellation**:
+  - Abort in-progress stream assembly at any time with a dedicated **Cancel** button in the popup.
+  - Instantly terminates all in-flight network segment requests using `AbortController` and releases memory buffers.
+  - Automatic teardown and cleanup if the browser tab is refreshed or closed mid-download.
 - ⚡ **One-Click FFmpeg Command**:
   - For massive livestreams or power users, one click copies the exact CLI command:
     ```bash
@@ -46,6 +50,9 @@ video-downloader-extension/
 ├── background.js         # Service worker: network sniffing & download manager
 ├── content.js            # Content script: primary video detection & DOM analyzer
 ├── hlsDownloader.js      # In-browser HLS playlist parser, segment fetcher & merger
+├── offscreen/
+│   ├── offscreen.html    # Dedicated offscreen DOM document
+│   └── offscreen.js      # Offscreen HLS stitcher & blob creator
 ├── popup/
 │   ├── popup.html        # Extension UI layout
 │   ├── popup.css         # Modern dark-mode styling
@@ -91,6 +98,7 @@ A local testing environment is bundled in [`test/test_page.html`](test/test_page
 2. Test both scenarios:
    - **Test 1 (Direct MP4 Video)**: Play the video, click the extension icon, and click **Download Video**.
    - **Test 2 (HLS Stream)**: Play the Mux HLS stream, click the extension icon, and click **Download & Assemble Video**. Observe the live progress bar as it fetches and stitches the segments into a playable video.
+   - **Test 3 (Mid-Download Cancellation)**: While an HLS stream is downloading, click **Cancel** in the popup progress box. Observe that all network segment downloads abort immediately, the UI resets, and memory is freed.
 
 ---
 

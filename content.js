@@ -101,36 +101,47 @@
     };
   }
 
+  /**
+   * Safely send a message to the extension background.
+   * Returns false (instead of throwing) if the extension context has been
+   * invalidated (e.g. the extension was reloaded while this tab was open).
+   */
+  function safeSendMessage(msg) {
+    try {
+      return chrome.runtime.sendMessage(msg).catch(() => {});
+    } catch (e) {
+      // "Extension context invalidated" — ignore silently
+    }
+  }
+
   // Notify background script when any video begins playing
   document.addEventListener("play", (event) => {
     if (event.target && event.target.tagName === "VIDEO") {
       const result = detectVideos();
       if (result.mainVideo) {
-        chrome.runtime.sendMessage({
-          type: "VIDEO_DETECTED",
-          data: result
-        }).catch(() => {});
+        safeSendMessage({ type: "VIDEO_DETECTED", data: result });
       }
     }
   }, true);
 
   // Listen for queries from popup or background script
-  chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    if (request.type === "GET_MAIN_VIDEO") {
-      const result = detectVideos();
-      sendResponse(result);
-    }
-    return true;
-  });
+  try {
+    chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+      if (request.type === "GET_MAIN_VIDEO") {
+        const result = detectVideos();
+        sendResponse(result);
+      }
+      return true;
+    });
+  } catch (e) {
+    // Extension context already invalidated — listener cannot be registered
+  }
 
   // Initial detection when page is ready
   setTimeout(() => {
     const result = detectVideos();
     if (result.mainVideo) {
-      chrome.runtime.sendMessage({
-        type: "VIDEO_DETECTED",
-        data: result
-      }).catch(() => {});
+      safeSendMessage({ type: "VIDEO_DETECTED", data: result });
     }
   }, 1000);
 })();
